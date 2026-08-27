@@ -10,6 +10,7 @@
   let admin = false;
   let zoom = 1;
   let selectedDupId = null;
+  let openTableId = null;
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -214,12 +215,17 @@
       if (admin) $("modalAdd").hidden = false;
     };
     $("closeAdmin").onclick = () => (els.admin.hidden = true);
-    $("closeModal").onclick = () => (els.modal.hidden = true);
+    $("closeModal").onclick = () => {
+      els.modal.hidden = true;
+      openTableId = null;
+    };
     els.admin.addEventListener("click", (e) => {
       if (e.target === els.admin) els.admin.hidden = true;
     });
     els.modal.addEventListener("click", (e) => {
-      if (e.target === els.modal) els.modal.hidden = true;
+      if (e.target !== els.modal) return;
+      els.modal.hidden = true;
+      openTableId = null;
     });
 
     $("pinForm").onsubmit = (e) => {
@@ -231,11 +237,15 @@
         els.adminBody.hidden = false;
         $("modalAdd").hidden = false;
         toast("Yönetim açık");
+        refreshUi();
       } else toast("Şifre yanlış");
     };
 
     if (sessionStorage.getItem("dugun-admin") === "1") {
       admin = true;
+      $("pinForm").hidden = true;
+      els.adminBody.hidden = false;
+      $("modalAdd").hidden = false;
     }
 
     $("addForm").onsubmit = async (e) => {
@@ -266,9 +276,8 @@
         e.target.reset();
         selectedDupId = null;
         els.dupPick.hidden = true;
-        renderAll();
-        highlight(table.id);
         toast(`${added} kişi masa ${table.no}’ye eklendi`);
+        highlight(table.id);
       }
     };
 
@@ -307,8 +316,7 @@
       if (addGuests([name], id, "", "")) {
         await save();
         e.target.reset();
-        renderAll();
-        openTable(id);
+        openTableId = id;
       }
     };
 
@@ -322,12 +330,23 @@
     });
     $("listFilter").oninput = renderList;
     $("listSort").onchange = renderList;
+    els.guestList.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-del]");
+      if (!b) return;
+      await removeGuest(b.dataset.del);
+    });
+    $("modalPeople").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-del]");
+      if (!b) return;
+      await removeGuest(b.dataset.del);
+    });
 
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       els.admin.hidden = true;
       els.modal.hidden = true;
       els.suggest.hidden = true;
+      openTableId = null;
     });
 
     window.addEventListener("resize", debounce(fitZoom, 150));
@@ -436,7 +455,27 @@
     el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
   }
 
+  function delBtn(id) {
+    return admin ? `<button type="button" class="xbtn" data-del="${id}">sil</button>` : "";
+  }
+
+  async function removeGuest(id) {
+    const g = state.guests.find((x) => x.id === id);
+    if (!g) return;
+    rememberRemoved(id);
+    state.guests = state.guests.filter((x) => x.id !== id);
+    writeLocal();
+    await save();
+    toast(`${g.name} silindi`);
+  }
+
+  function refreshUi() {
+    renderAll();
+    if (!els.modal.hidden && openTableId) openTable(openTableId);
+  }
+
   function openTable(id) {
+    openTableId = id;
     const t = byId[id];
     const people = state.guests.filter((g) => g.tableId === id);
     $("modalTitle").textContent = `Masa ${t.no}  ·  ${t.cap} kişilik`;
@@ -447,7 +486,7 @@
           .map(
             (g) => `<li>
               <span>${esc(g.name)} <span class="meta">${esc(g.note || "")} ${sideLabel(g.side)}</span></span>
-              ${admin ? `<button type="button" class="xbtn" data-del="${g.id}">sil</button>` : ""}
+              ${delBtn(g.id)}
             </li>`
           )
           .join("")
@@ -455,14 +494,6 @@
     $("modalAdd").hidden = !admin;
     $("modalAdd").dataset.tableId = id;
     els.modal.hidden = false;
-    $("modalPeople").onclick = async (e) => {
-      const b = e.target.closest("[data-del]");
-      if (!b) return;
-      state.guests = state.guests.filter((g) => g.id !== b.dataset.del);
-      await save();
-      renderAll();
-      openTable(id);
-    };
   }
 
   function renderAll() {
@@ -526,7 +557,10 @@
 
     if (sort === "name") {
       els.guestList.innerHTML = `<ul class="people">${guests
-        .map((g) => `<li><span>${esc(g.name)}</span><span class="meta">Masa ${tableNo(g)}</span></li>`)
+        .map(
+          (g) =>
+            `<li><span>${esc(g.name)} <span class="meta">Masa ${tableNo(g)}</span></span>${delBtn(g.id)}</li>`
+        )
         .join("")}</ul>`;
       return;
     }
@@ -542,7 +576,12 @@
         const t = byId[id];
         return `<article class="table-group">
           <h3>Masa ${t.no} · ${gs.length}/${t.cap} · ${shortZone(t)}</h3>
-          <ul>${gs.map((g) => `<li>${esc(g.name)}${g.note ? " — " + esc(g.note) : ""}</li>`).join("")}</ul>
+          <ul class="people">${gs
+            .map(
+              (g) =>
+                `<li><span>${esc(g.name)}${g.note ? " — " + esc(g.note) : ""}</span>${delBtn(g.id)}</li>`
+            )
+            .join("")}</ul>
         </article>`;
       })
       .join("");
@@ -605,6 +644,7 @@
     const localIds = new Set((local || []).map((g) => g.id));
     const localMap = guestMap(local);
     const removed = new Set([...baseIds].filter((id) => !localIds.has(id)));
+    readRemoved().forEach((id) => removed.add(id));
     const out = [];
     const seen = new Set();
     (remote || []).forEach((g) => {
@@ -613,11 +653,32 @@
       seen.add(g.id);
     });
     (local || []).forEach((g) => {
-      if (!g || !g.id || seen.has(g.id) || baseIds.has(g.id)) return;
+      if (!g || !g.id || seen.has(g.id) || removed.has(g.id) || baseIds.has(g.id)) return;
       out.push(g);
       seen.add(g.id);
     });
     return out;
+  }
+
+  function readRemoved() {
+    try {
+      const a = JSON.parse(localStorage.getItem("dugun-removed") || "[]");
+      return new Set(Array.isArray(a) ? a : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function rememberRemoved(id) {
+    const s = readRemoved();
+    s.add(id);
+    localStorage.setItem("dugun-removed", JSON.stringify([...s]));
+  }
+
+  function pruneRemoved(guests) {
+    const have = new Set((guests || []).map((g) => g.id));
+    const leftover = [...readRemoved()].filter((id) => have.has(id));
+    localStorage.setItem("dugun-removed", JSON.stringify(leftover));
   }
 
   function readSynced() {
@@ -706,15 +767,17 @@
           meta: Object.assign({}, remote.meta, cached.meta)
         };
         writeLocal();
-        writeSynced(remote);
         lastJsonOk = true;
         backend = "json";
         const remoteIds = new Set(remote.guests.map((g) => g.id));
+        const localIds = new Set(state.guests.map((g) => g.id));
         const hasLocalOnly = state.guests.some((g) => !remoteIds.has(g.id));
+        const hasDeletes = remote.guests.some((g) => !localIds.has(g.id)) || readRemoved().size;
         ready = true;
         setSync();
-        if (hasLocalOnly) await flushPut(true);
+        if (hasLocalOnly || hasDeletes) await flushPut(true, true);
         writeSynced(state);
+        pruneRemoved(state.guests);
         return;
       }
     } catch {
@@ -785,10 +848,11 @@
       state = merged;
       writeLocal();
       writeSynced(merged);
+      pruneRemoved(merged.guests);
       lastJsonOk = true;
       backend = "json";
       setSync();
-      renderAll();
+      refreshUi();
     } catch {
       lastJsonOk = false;
       toast("Ortak kayda ulaşılamadı, bu tarayıcıda duruyor");
