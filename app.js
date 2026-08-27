@@ -640,11 +640,14 @@
   }
 
   function mergeGuests(base, local, remote) {
-    const baseIds = new Set((base || []).map((g) => g.id));
-    const localIds = new Set((local || []).map((g) => g.id));
+    const localIds = new Set((local || []).map((g) => g.id).filter(Boolean));
     const localMap = guestMap(local);
-    const removed = new Set([...baseIds].filter((id) => !localIds.has(id)));
-    readRemoved().forEach((id) => removed.add(id));
+    const removed = readRemoved();
+    if (local.length) {
+      (base || []).forEach((g) => {
+        if (g && g.id && !localIds.has(g.id)) removed.add(g.id);
+      });
+    }
     const out = [];
     const seen = new Set();
     (remote || []).forEach((g) => {
@@ -653,7 +656,7 @@
       seen.add(g.id);
     });
     (local || []).forEach((g) => {
-      if (!g || !g.id || seen.has(g.id) || removed.has(g.id) || baseIds.has(g.id)) return;
+      if (!g || !g.id || seen.has(g.id) || removed.has(g.id)) return;
       out.push(g);
       seen.add(g.id);
     });
@@ -745,14 +748,24 @@
     return body;
   }
 
+  function fetchTimeout(ms) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    return { signal: ctl.signal, done: () => clearTimeout(t) };
+  }
+
   async function pullRemote() {
     const { on, url } = jsonCfg();
     if (!on) return null;
-    let getUrl = url.includes("jsonbin.io") && !/\/latest\/?$/.test(url) ? url.replace(/\/?$/, "/") + "latest" : url;
-    getUrl += (getUrl.includes("?") ? "&" : "?") + "_=" + Date.now();
-    const r = await fetch(getUrl, { cache: "no-store", headers: jsonHeaders(), signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    return parseJsonRecord(await r.json());
+    const getUrl = url.includes("jsonbin.io") && !/\/latest\/?$/.test(url) ? url.replace(/\/?$/, "/") + "latest" : url;
+    const to = fetchTimeout(10000);
+    try {
+      const r = await fetch(getUrl, { cache: "no-store", headers: jsonHeaders(), signal: to.signal });
+      if (!r.ok) return null;
+      return parseJsonRecord(await r.json());
+    } finally {
+      to.done();
+    }
   }
 
   async function load() {
@@ -762,22 +775,23 @@
     try {
       const remote = await pullRemote();
       if (remote) {
+        const removed = readRemoved();
+        const map = guestMap(remote.guests);
+        cached.guests.forEach((g) => {
+          if (g && g.id && !map.has(g.id) && !removed.has(g.id)) map.set(g.id, g);
+        });
+        removed.forEach((id) => map.delete(id));
         state = {
-          guests: mergeGuests(synced.guests, cached.guests, remote.guests),
+          guests: [...map.values()],
           meta: Object.assign({}, remote.meta, cached.meta)
         };
         writeLocal();
+        writeSynced(state);
         lastJsonOk = true;
         backend = "json";
-        const remoteIds = new Set(remote.guests.map((g) => g.id));
-        const localIds = new Set(state.guests.map((g) => g.id));
-        const hasLocalOnly = state.guests.some((g) => !remoteIds.has(g.id));
-        const hasDeletes = remote.guests.some((g) => !localIds.has(g.id)) || readRemoved().size;
         ready = true;
         setSync();
-        if (hasLocalOnly || hasDeletes) await flushPut(true, true);
-        writeSynced(state);
-        pruneRemoved(state.guests);
+        refreshUi();
         return;
       }
     } catch {
@@ -787,6 +801,7 @@
     backend = cached.guests.length ? "json" : "local";
     ready = true;
     setSync();
+    refreshUi();
   }
 
   async function save() {
@@ -806,7 +821,6 @@
       method: "PUT",
       headers,
       body,
-      signal: AbortSignal.timeout(8000),
       keepalive: true
     });
   }
@@ -822,14 +836,19 @@
     putBusy = true;
     try {
       const local = cloneState(state);
-      const base = cloneState(synced);
       let remote = null;
       try {
         remote = await pullRemote();
       } catch {
         remote = null;
       }
-      if (!remote) remote = cloneState(base);
+      if (!remote) {
+        lastJsonOk = false;
+        toast("Liste alınamadı, kayıt yazılmadı");
+        setSync();
+        return;
+      }
+      const base = synced.guests.length ? cloneState(synced) : cloneState(remote);
       const merged = {
         guests: mergeGuests(base.guests, local.guests, remote.guests),
         meta: Object.assign({}, remote.meta, local.meta)
