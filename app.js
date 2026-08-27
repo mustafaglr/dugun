@@ -331,15 +331,8 @@
     });
 
     window.addEventListener("resize", debounce(fitZoom, 150));
-    window.addEventListener("pagehide", () => flushPut(true));
-    document.addEventListener("visibilitychange", async () => {
-      if (document.visibilityState === "hidden") {
-        flushPut(true);
-        return;
-      }
-      if (cacheAge() > 15000) {
-        if (await fetchJson()) renderAll();
-      }
+    window.addEventListener("pagehide", () => {
+      if (ready && state.guests.length) flushPut(true);
     });
     requestAnimationFrame(fitZoom);
   }
@@ -588,6 +581,14 @@
   let putBusy = false;
   let lastPutBody = "";
   let lastJsonOk = false;
+  let ready = false;
+
+  function cloneState(s) {
+    return {
+      guests: Array.isArray(s && s.guests) ? s.guests.map((g) => Object.assign({}, g)) : [],
+      meta: s && s.meta && typeof s.meta === "object" ? Object.assign({}, s.meta) : {}
+    };
+  }
 
   function jsonCfg() {
     const url = String(cfg.jsonUrl || "").trim();
@@ -638,51 +639,29 @@
     return body;
   }
 
-  function cacheAge() {
-    const at = Number(localStorage.getItem("dugun-state-at") || 0);
-    return at ? Date.now() - at : Infinity;
-  }
-
-  function applyRemote(data) {
-    state = parseJsonRecord(data);
-    writeLocal();
-    localStorage.setItem("dugun-state-at", String(Date.now()));
-    lastJsonOk = true;
-    backend = "json";
-  }
-
-  async function tryFetch(url, headers) {
-    const r = await fetch(url, { cache: "no-store", headers, signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    return r.json();
-  }
-
-  async function fetchJson() {
+  async function pullRemote() {
     const { on, url } = jsonCfg();
-    if (!on) return false;
-    const getUrl = url.includes("jsonbin.io") && !/\/latest\/?$/.test(url) ? url.replace(/\/?$/, "/") + "latest" : url;
-    try {
-      const data = await tryFetch(getUrl, jsonHeaders());
-      if (data) {
-        applyRemote(data);
-        return true;
-      }
-    } catch {
-      return false;
-    }
-    return false;
+    if (!on) return null;
+    let getUrl = url.includes("jsonbin.io") && !/\/latest\/?$/.test(url) ? url.replace(/\/?$/, "/") + "latest" : url;
+    getUrl += (getUrl.includes("?") ? "&" : "?") + "_=" + Date.now();
+    const r = await fetch(getUrl, { cache: "no-store", headers: jsonHeaders(), signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    return parseJsonRecord(await r.json());
   }
 
   async function load() {
-    const cached = readLocal();
-    if (cached) state = cached;
+    const cached = cloneState(readLocal() || { guests: [], meta: {} });
+    if (cached.guests.length) state = cloneState(cached);
     try {
-      if (await fetchJson()) {
-        if (!state.guests.length && cached && cached.guests.length) {
-          state = cached;
-          writeLocal();
-          await flushPut(true);
-        }
+      const remote = await pullRemote();
+      if (remote) {
+        if (remote.guests.length >= cached.guests.length) state = remote;
+        else state = cached;
+        writeLocal();
+        lastJsonOk = true;
+        backend = "json";
+        if (cached.guests.length > remote.guests.length) await flushPut(true);
+        ready = true;
         setSync();
         return;
       }
@@ -690,7 +669,8 @@
       /* local */
     }
     lastJsonOk = false;
-    backend = cached ? "json" : "local";
+    backend = cached.guests.length ? "json" : "local";
+    ready = true;
     setSync();
   }
 
@@ -699,13 +679,14 @@
     lastJsonOk = true;
     backend = "json";
     setSync();
-    await flushPut(true);
+    await flushPut(true, true);
   }
 
-  async function flushPut(keepTimer) {
+  async function flushPut(keepTimer, allowEmpty) {
     if (!keepTimer) putTimer = 0;
     else clearTimeout(putTimer);
     if (putBusy) return;
+    if (!state.guests.length && !allowEmpty) return;
     const body = JSON.stringify(state);
     if (body === lastPutBody) return;
     putBusy = true;
