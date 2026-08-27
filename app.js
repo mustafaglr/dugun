@@ -366,9 +366,6 @@
     });
 
     window.addEventListener("resize", debounce(fitZoom, 150));
-    window.addEventListener("pagehide", () => {
-      if (ready && state.guests.length) flushPut(true);
-    });
     requestAnimationFrame(fitZoom);
   }
 
@@ -648,14 +645,12 @@
   }
 
   function mergeGuests(base, local, remote) {
-    const localIds = new Set((local || []).map((g) => g.id).filter(Boolean));
     const localMap = guestMap(local);
+    const baseIds = new Set((base || []).map((g) => g.id).filter(Boolean));
     const removed = readRemoved();
-    if (local.length) {
-      (base || []).forEach((g) => {
-        if (g && g.id && !localIds.has(g.id)) removed.add(g.id);
-      });
-    }
+    (base || []).forEach((g) => {
+      if (g && g.id && !localMap.has(g.id)) removed.add(g.id);
+    });
     const out = [];
     const seen = new Set();
     (remote || []).forEach((g) => {
@@ -665,6 +660,7 @@
     });
     (local || []).forEach((g) => {
       if (!g || !g.id || seen.has(g.id) || removed.has(g.id)) return;
+      if (baseIds.has(g.id)) return;
       out.push(g);
       seen.add(g.id);
     });
@@ -796,14 +792,9 @@
       if (gen !== loadGen) return;
       if (remote) {
         const removed = readRemoved();
-        const map = guestMap(remote.guests);
-        cached.guests.forEach((g) => {
-          if (g && g.id && !map.has(g.id) && !removed.has(g.id)) map.set(g.id, g);
-        });
-        removed.forEach((id) => map.delete(id));
         state = {
-          guests: [...map.values()],
-          meta: Object.assign({}, remote.meta, cached.meta)
+          guests: (remote.guests || []).filter((g) => g && g.id && !removed.has(g.id)),
+          meta: Object.assign({}, remote.meta)
         };
         writeLocal();
         writeSynced(state);
