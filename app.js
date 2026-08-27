@@ -582,12 +582,57 @@
   let lastPutBody = "";
   let lastJsonOk = false;
   let ready = false;
+  let saveQueued = false;
+  let synced = { guests: [], meta: {} };
 
   function cloneState(s) {
     return {
       guests: Array.isArray(s && s.guests) ? s.guests.map((g) => Object.assign({}, g)) : [],
       meta: s && s.meta && typeof s.meta === "object" ? Object.assign({}, s.meta) : {}
     };
+  }
+
+  function guestMap(list) {
+    const m = new Map();
+    (list || []).forEach((g) => {
+      if (g && g.id) m.set(g.id, g);
+    });
+    return m;
+  }
+
+  function mergeGuests(base, local, remote) {
+    const baseIds = new Set((base || []).map((g) => g.id));
+    const localIds = new Set((local || []).map((g) => g.id));
+    const localMap = guestMap(local);
+    const removed = new Set([...baseIds].filter((id) => !localIds.has(id)));
+    const out = [];
+    const seen = new Set();
+    (remote || []).forEach((g) => {
+      if (!g || !g.id || removed.has(g.id)) return;
+      out.push(localMap.has(g.id) ? localMap.get(g.id) : g);
+      seen.add(g.id);
+    });
+    (local || []).forEach((g) => {
+      if (!g || !g.id || seen.has(g.id) || baseIds.has(g.id)) return;
+      out.push(g);
+      seen.add(g.id);
+    });
+    return out;
+  }
+
+  function readSynced() {
+    try {
+      const raw = localStorage.getItem("dugun-synced");
+      if (!raw) return { guests: [], meta: {} };
+      return cloneState(JSON.parse(raw));
+    } catch {
+      return { guests: [], meta: {} };
+    }
+  }
+
+  function writeSynced(s) {
+    synced = cloneState(s);
+    localStorage.setItem("dugun-synced", JSON.stringify(synced));
   }
 
   function jsonCfg() {
@@ -650,19 +695,26 @@
   }
 
   async function load() {
+    synced = readSynced();
     const cached = cloneState(readLocal() || { guests: [], meta: {} });
     if (cached.guests.length) state = cloneState(cached);
     try {
       const remote = await pullRemote();
       if (remote) {
-        if (remote.guests.length >= cached.guests.length) state = remote;
-        else state = cached;
+        state = {
+          guests: mergeGuests(synced.guests, cached.guests, remote.guests),
+          meta: Object.assign({}, remote.meta, cached.meta)
+        };
         writeLocal();
+        writeSynced(remote);
         lastJsonOk = true;
         backend = "json";
-        if (cached.guests.length > remote.guests.length) await flushPut(true);
+        const remoteIds = new Set(remote.guests.map((g) => g.id));
+        const hasLocalOnly = state.guests.some((g) => !remoteIds.has(g.id));
         ready = true;
         setSync();
+        if (hasLocalOnly) await flushPut(true);
+        writeSynced(state);
         return;
       }
     } catch {
@@ -682,27 +734,47 @@
     await flushPut(true, true);
   }
 
+  async function pushState(body) {
+    const { url } = jsonCfg();
+    const putUrl = url.includes("jsonbin.io") ? url.replace(/\/latest\/?$/, "") : url;
+    const headers = jsonHeaders({ "Content-Type": "application/json" });
+    if (url.includes("jsonbin.io")) headers["X-Bin-Versioning"] = "false";
+    return fetch(putUrl, {
+      method: "PUT",
+      headers,
+      body,
+      signal: AbortSignal.timeout(8000),
+      keepalive: true
+    });
+  }
+
   async function flushPut(keepTimer, allowEmpty) {
     if (!keepTimer) putTimer = 0;
     else clearTimeout(putTimer);
-    if (putBusy) return;
-    if (!state.guests.length && !allowEmpty) return;
-    const body = JSON.stringify(state);
-    if (body === lastPutBody) return;
+    if (putBusy) {
+      saveQueued = true;
+      return;
+    }
+    if (!jsonCfg().on) return;
     putBusy = true;
     try {
-      const { on, url } = jsonCfg();
-      if (!on) throw new Error("no json");
-      const putUrl = url.includes("jsonbin.io") ? url.replace(/\/latest\/?$/, "") : url;
-      const headers = jsonHeaders({ "Content-Type": "application/json" });
-      if (url.includes("jsonbin.io")) headers["X-Bin-Versioning"] = "false";
-      const r = await fetch(putUrl, {
-        method: "PUT",
-        headers,
-        body,
-        signal: AbortSignal.timeout(8000),
-        keepalive: true
-      });
+      const local = cloneState(state);
+      const base = cloneState(synced);
+      let remote = null;
+      try {
+        remote = await pullRemote();
+      } catch {
+        remote = null;
+      }
+      if (!remote) remote = cloneState(base);
+      const merged = {
+        guests: mergeGuests(base.guests, local.guests, remote.guests),
+        meta: Object.assign({}, remote.meta, local.meta)
+      };
+      if (!merged.guests.length && !allowEmpty) return;
+      const body = JSON.stringify(merged);
+      if (body === lastPutBody && body === JSON.stringify(remote)) return;
+      const r = await pushState(body);
       if (!r.ok) {
         lastJsonOk = false;
         toast("Ortak kayda yazılamadı (" + r.status + ")");
@@ -710,16 +782,23 @@
         return;
       }
       lastPutBody = body;
+      state = merged;
+      writeLocal();
+      writeSynced(merged);
       lastJsonOk = true;
       backend = "json";
-      localStorage.setItem("dugun-state-at", String(Date.now()));
       setSync();
+      renderAll();
     } catch {
       lastJsonOk = false;
       toast("Ortak kayda ulaşılamadı, bu tarayıcıda duruyor");
       setSync();
     } finally {
       putBusy = false;
+      if (saveQueued) {
+        saveQueued = false;
+        flushPut(true, allowEmpty);
+      }
     }
   }
 
