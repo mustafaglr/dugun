@@ -1,0 +1,6 @@
+node_modules/
+.netlify/
+netlify/
+netlify.toml
+package.json
+misafirler.json
