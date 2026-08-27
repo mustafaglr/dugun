@@ -91,6 +91,7 @@
       add(`y-${n}`, n, 10, "round", "yellow", "pool-top-right", "Havuzun üst kenarına yakın, sağ blok")
     );
 
+    add("y-50", 50, 10, "round", "yellow", "pool-left", "Havuzun sol kenarı, pembe 42 ile sarı 27 arası");
     [27, 28, 29, 30, 31].forEach((n) =>
       add(`y-${n}`, n, 10, "round", "yellow", "pool-left", "Havuzun sol kenarı, merdiven tarafı")
     );
@@ -163,6 +164,7 @@
       ${place("pl-42",1,3)}${place("pl-43",1,4)}${place("pl-44",1,5)}${place("pl-45",1,6)}
       ${place("pl-46",1,7)}${place("pl-47",1,8)}${place("pl-48",1,9)}${place("pl-49",1,10)}
 
+      ${place("y-50",2,3)}
       ${place("y-27",2,4)}${place("y-28",2,5)}${place("y-29",2,6)}${place("y-30",2,7)}${place("y-31",2,8)}
 
       <div class="pool" style="grid-column:3/13;grid-row:4/8">HAVUZ<small>500 kişilik</small></div>
