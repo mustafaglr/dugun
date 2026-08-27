@@ -11,6 +11,14 @@
   let zoom = 1;
   let selectedDupId = null;
   let openTableId = null;
+  let putTimer = 0;
+  let putBusy = false;
+  let lastPutBody = "";
+  let lastJsonOk = false;
+  let ready = false;
+  let saveQueued = false;
+  let synced = { guests: [], meta: {} };
+  let loadGen = 0;
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -36,14 +44,22 @@
     tableHint: $("tableHint")
   };
 
-  init();
-
   async function init() {
     renderPlan();
     bind();
     applyMeta(cfg);
-    await load();
+    const cached = readLocal();
+    if (cached && cached.guests.length) state = cloneState(cached);
+    synced = readSynced();
     renderAll();
+    try {
+      await load();
+    } catch {
+      ready = true;
+      lastJsonOk = false;
+      setSync();
+      renderAll();
+    }
   }
 
   function buildTables() {
@@ -616,14 +632,6 @@
     setZoom(Math.min(1, avail / w));
   }
 
-  let putTimer = 0;
-  let putBusy = false;
-  let lastPutBody = "";
-  let lastJsonOk = false;
-  let ready = false;
-  let saveQueued = false;
-  let synced = { guests: [], meta: {} };
-
   function cloneState(s) {
     return {
       guests: Array.isArray(s && s.guests) ? s.guests.map((g) => Object.assign({}, g)) : [],
@@ -748,32 +756,44 @@
     return body;
   }
 
-  function fetchTimeout(ms) {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), ms);
-    return { signal: ctl.signal, done: () => clearTimeout(t) };
+  function raceMs(promise, ms) {
+    let t;
+    const timeout = new Promise((_, reject) => {
+      t = setTimeout(() => reject(new Error("timeout")), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
   }
 
   async function pullRemote() {
     const { on, url } = jsonCfg();
     if (!on) return null;
     const getUrl = url.includes("jsonbin.io") && !/\/latest\/?$/.test(url) ? url.replace(/\/?$/, "/") + "latest" : url;
-    const to = fetchTimeout(10000);
-    try {
-      const r = await fetch(getUrl, { cache: "no-store", headers: jsonHeaders(), signal: to.signal });
+    const read = async () => {
+      let r = await fetch(getUrl, { cache: "no-store" });
+      if (r.status === 401 || r.status === 403) {
+        r = await fetch(getUrl, { cache: "no-store", headers: jsonHeaders() });
+      }
       if (!r.ok) return null;
       return parseJsonRecord(await r.json());
-    } finally {
-      to.done();
+    };
+    try {
+      return await raceMs(read(), 8000);
+    } catch {
+      return null;
     }
   }
 
   async function load() {
+    const gen = ++loadGen;
     synced = readSynced();
     const cached = cloneState(readLocal() || { guests: [], meta: {} });
-    if (cached.guests.length) state = cloneState(cached);
+    if (cached.guests.length) {
+      state = cloneState(cached);
+      renderAll();
+    }
     try {
       const remote = await pullRemote();
+      if (gen !== loadGen) return;
       if (remote) {
         const removed = readRemoved();
         const map = guestMap(remote.guests);
@@ -797,6 +817,7 @@
     } catch {
       /* local */
     }
+    if (gen !== loadGen) return;
     lastJsonOk = false;
     backend = cached.guests.length ? "json" : "local";
     ready = true;
@@ -944,4 +965,6 @@
       t = setTimeout(fn, ms);
     };
   }
+
+  init();
 })();
